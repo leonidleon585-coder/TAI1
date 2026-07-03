@@ -17,6 +17,14 @@ object WebScraper {
      * Fetches a webpage and returns sanitized prose text.
      */
     suspend fun fetchAndSanitize(urlStr: String): String = withContext(Dispatchers.IO) {
+        val rawHtml = fetchRawHtml(urlStr)
+        return@withContext sanitizeHtml(rawHtml)
+    }
+
+    /**
+     * Fetches raw HTML of a webpage for link parsing and sanitization.
+     */
+    suspend fun fetchRawHtml(urlStr: String): String = withContext(Dispatchers.IO) {
         val url = if (!urlStr.startsWith("http://") && !urlStr.startsWith("https://")) {
             "https://$urlStr"
         } else {
@@ -33,14 +41,65 @@ object WebScraper {
             throw Exception("HTTP Error: ${response.code} ${response.message}")
         }
 
-        val bodyHtml = response.body?.string() ?: throw Exception("Empty response body")
-        return@withContext sanitizeHtml(bodyHtml)
+        return@withContext response.body?.string() ?: throw Exception("Empty response body")
+    }
+
+    /**
+     * Extracts up to 5 secondary links from the original domain paths in the HTML body.
+     */
+    fun extractLinks(html: String, baseUrl: String): List<String> {
+        val linkRegex = "<a\\s+(?:[^>]*?\\s+)?href=\"([^\"]+)\"".toRegex(RegexOption.IGNORE_CASE)
+        val matches = linkRegex.findAll(html)
+        val links = mutableListOf<String>()
+        
+        val baseUri = try {
+            java.net.URI(baseUrl)
+        } catch (e: Exception) {
+            null
+        }
+        val baseHost = baseUri?.host ?: ""
+
+        for (match in matches) {
+            var href = match.groupValues[1].trim()
+            if (href.isEmpty() || href.startsWith("#") || href.startsWith("javascript:")) continue
+
+            val resolvedUrl = try {
+                if (href.startsWith("/")) {
+                    val scheme = baseUri?.scheme ?: "https"
+                    "$scheme://$baseHost$href"
+                } else if (!href.startsWith("http://") && !href.startsWith("https://")) {
+                    val scheme = baseUri?.scheme ?: "https"
+                    val path = baseUri?.path ?: ""
+                    val lastSlash = path.lastIndexOf('/')
+                    val basePath = if (lastSlash >= 0) path.substring(0, lastSlash + 1) else "/"
+                    "$scheme://$baseHost$basePath$href"
+                } else {
+                    href
+                }
+            } catch (e: Exception) {
+                href
+            }
+
+            try {
+                val resolvedUri = java.net.URI(resolvedUrl)
+                val resolvedHost = resolvedUri.host ?: ""
+                // Match domain and original path constraints
+                if (resolvedHost.isNotEmpty() && (resolvedHost.endsWith(baseHost) || baseHost.endsWith(resolvedHost))) {
+                    if (!links.contains(resolvedUrl)) {
+                        links.add(resolvedUrl)
+                    }
+                }
+            } catch (e: Exception) {
+                // Ignore malformed links
+            }
+        }
+        return links
     }
 
     /**
      * Strips HTML tags, script sections, styling blocks, and extracts pure text.
      */
-    private fun sanitizeHtml(html: String): String {
+    fun sanitizeHtml(html: String): String {
         var clean = html
 
         // Remove script tags and their contents

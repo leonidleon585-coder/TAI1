@@ -4,6 +4,10 @@ import android.content.Context
 import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import androidx.work.workDataOf
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -41,7 +45,12 @@ data class TrainingState(
     
     // Exact mathematical formula outputs
     val totalTrainableParameters: Int = 0,
-    val throughputSpeed: Double = 0.0
+    val throughputSpeed: Double = 0.0,
+
+    // Background Scraping Queue indicators
+    val totalTokensDownloaded: Long = 0,
+    val activeUrlProcessing: String = "Idle",
+    val discoveredLinksInQueue: Int = 0
 )
 
 /**
@@ -58,27 +67,41 @@ data class GenerativeBatchGradient(
 
 class TrainerEngine(private val context: Context) {
 
+    companion object {
+        @Volatile
+        private var instance: TrainerEngine? = null
+
+        fun getInstance(context: Context): TrainerEngine {
+            return instance ?: synchronized(this) {
+                instance ?: TrainerEngine(context.applicationContext).also { instance = it }
+            }
+        }
+    }
+
     private val _state = MutableStateFlow(TrainingState())
     val state: StateFlow<TrainingState> = _state.asStateFlow()
 
-    private var trainingJob: Job? = null
-    private val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    internal val mainScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     // Generative Next-Character Predictor
-    private var kotlinGenNet: KotlinGenerativeNetwork? = null
-    private var charToId: Map<Char, Int> = emptyMap()
-    private var idToChar: Map<Int, Char> = emptyMap()
-    private var datasetText: String = ""
+    internal var kotlinGenNet: KotlinGenerativeNetwork? = null
+    internal var charToId: Map<Char, Int> = emptyMap()
+    internal var idToChar: Map<Int, Char> = emptyMap()
+    internal var datasetText: String = ""
 
     // Context Window size for character predicting
-    private val contextWindow = 12
+    internal val contextWindow = 12
 
     // Custom LiteRT Interpreter placeholder
-    private var customInterpreter: Interpreter? = null
-    private var customModelFile: File? = null
+    internal var customInterpreter: Interpreter? = null
+    internal var customModelFile: File? = null
 
     init {
         loadDefaultDataset()
+    }
+
+    fun updateState(transform: (TrainingState) -> TrainingState) {
+        _state.value = transform(_state.value)
     }
 
     fun resetState() {
@@ -126,6 +149,9 @@ class TrainerEngine(private val context: Context) {
                 lossHistory = emptyList(),
                 accuracy = 0f,
                 elapsedMs = 0,
+                totalTokensDownloaded = 0,
+                activeUrlProcessing = "Idle",
+                discoveredLinksInQueue = 0,
                 logs = _state.value.logs + "Local engine caches and temporary dataset buffers cleared."
             )
         } catch (e: Exception) {
@@ -238,6 +264,107 @@ class TrainerEngine(private val context: Context) {
     }
 
     /**
+     * Sequential Web Scraping Queue processor with Autonomous self-training link discovery.
+     */
+    fun processScraperQueue(inputUrls: String) {
+        val urls = inputUrls.split(Regex("[,\\n]"))
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+
+        if (urls.isEmpty()) return
+
+        _state.value = _state.value.copy(
+            activeUrlProcessing = "Initializing Scraper...",
+            discoveredLinksInQueue = urls.size,
+            logs = _state.value.logs + "Initializing queue scraping with ${urls.size} seed URLs..."
+        )
+
+        mainScope.launch(Dispatchers.IO) {
+            val scraperQueue = java.util.concurrent.ConcurrentLinkedQueue<String>()
+            val scrapedUrls = mutableSetOf<String>()
+            val sharedBuffer = StringBuilder()
+            var totalCharsDownloaded = 0L
+
+            scraperQueue.addAll(urls)
+
+            while (scraperQueue.isNotEmpty() && isActive) {
+                val currentUrl = scraperQueue.poll() ?: break
+
+                if (scrapedUrls.contains(currentUrl)) {
+                    _state.value = _state.value.copy(discoveredLinksInQueue = scraperQueue.size)
+                    continue
+                }
+                scrapedUrls.add(currentUrl)
+
+                _state.value = _state.value.copy(
+                    activeUrlProcessing = currentUrl,
+                    discoveredLinksInQueue = scraperQueue.size
+                )
+
+                try {
+                    val rawHtml = WebScraper.fetchRawHtml(currentUrl)
+                    val cleanText = WebScraper.sanitizeHtml(rawHtml)
+
+                    if (cleanText.isNotEmpty()) {
+                        sharedBuffer.append(cleanText).append("\n")
+                        totalCharsDownloaded += cleanText.length
+                    }
+
+                    // Autonomously extract up to 5 secondary links on same domain paths for self-training
+                    val isUserProvided = urls.any { it.contains(currentUrl) || currentUrl.contains(it) }
+                    if (isUserProvided) {
+                        val extracted = WebScraper.extractLinks(rawHtml, currentUrl)
+                        val secondary = extracted.take(5)
+                        var addedCount = 0
+                        for (link in secondary) {
+                            if (!scrapedUrls.contains(link) && !scraperQueue.contains(link)) {
+                                scraperQueue.add(link)
+                                addedCount++
+                            }
+                        }
+                        if (addedCount > 0) {
+                            _state.value = _state.value.copy(
+                                logs = _state.value.logs + "Discovered $addedCount secondary links from $currentUrl"
+                            )
+                        }
+                    }
+
+                    _state.value = _state.value.copy(
+                        totalTokensDownloaded = totalCharsDownloaded,
+                        discoveredLinksInQueue = scraperQueue.size,
+                        logs = _state.value.logs + "Processed URL: $currentUrl (${cleanText.length} chars)"
+                    )
+
+                } catch (e: Exception) {
+                    _state.value = _state.value.copy(
+                        logs = _state.value.logs + "Error processing URL $currentUrl: ${e.message}"
+                    )
+                }
+
+                delay(500) // prevent rate limiting
+            }
+
+            val finalScrapedText = sharedBuffer.toString()
+            withContext(Dispatchers.Main) {
+                if (finalScrapedText.isNotEmpty()) {
+                    loadWebScrapedDataset(finalScrapedText, "Scraper Autonomous Queue")
+                    _state.value = _state.value.copy(
+                        activeUrlProcessing = "Completed",
+                        discoveredLinksInQueue = 0,
+                        logs = _state.value.logs + "Scraper queue successfully ingested ${finalScrapedText.length} characters."
+                    )
+                } else {
+                    _state.value = _state.value.copy(
+                        activeUrlProcessing = "Idle",
+                        discoveredLinksInQueue = 0,
+                        logs = _state.value.logs + "Scraper finished with 0 downloaded characters."
+                    )
+                }
+            }
+        }
+    }
+
+    /**
      * Compute current weights magnitude distribution for character set
      */
     private fun updateCharacterWeights() {
@@ -296,11 +423,9 @@ class TrainerEngine(private val context: Context) {
     }
 
     /**
-     * Starts background training.
+     * Starts background training using Android WorkManager.
      */
     fun startTraining(epochs: Int, batchSize: Int, learningRate: Float) {
-        if (_state.value.isTraining) return
-
         _state.value = _state.value.copy(
             isTraining = true,
             totalEpochs = epochs,
@@ -308,231 +433,33 @@ class TrainerEngine(private val context: Context) {
             currentLoss = 0f,
             lossHistory = emptyList(),
             currentPerplexity = 0f,
-            logs = _state.value.logs + "Starting generative training loop: epochs=$epochs, batchSize=$batchSize, LR=$learningRate, Threads=${_state.value.numThreads}"
+            logs = _state.value.logs + "Enqueuing persistent background training: epochs=$epochs, batchSize=$batchSize, LR=$learningRate"
         )
 
-        trainingJob = mainScope.launch {
-            val startTime = SystemClock.elapsedRealtime()
-            try {
-                if (_state.value.isCustomModel) {
-                    runCustomTfliteGenerativeTraining(epochs, batchSize, learningRate, startTime)
-                } else {
-                    runBuiltInGenerativeTraining(epochs, batchSize, learningRate, startTime)
-                }
-            } catch (e: CancellationException) {
-                _state.value = _state.value.copy(
-                    isTraining = false,
-                    logs = _state.value.logs + "Training optimization paused by user."
-                )
-            } catch (e: Exception) {
-                _state.value = _state.value.copy(
-                    isTraining = false,
-                    logs = _state.value.logs + "Training error: ${e.message}"
-                )
-            }
-        }
+        val trainingData = workDataOf(
+            "epochs" to epochs,
+            "batchSize" to batchSize,
+            "learningRate" to learningRate
+        )
+
+        val trainingWorkRequest = OneTimeWorkRequestBuilder<BackgroundTrainingWorker>()
+            .setInputData(trainingData)
+            .addTag("TAI1_Neural_Training_Tag")
+            .build()
+
+        WorkManager.getInstance(context).enqueueUniqueWork(
+            "TAI1_Neural_Training",
+            ExistingWorkPolicy.REPLACE,
+            trainingWorkRequest
+        )
     }
 
     fun stopTraining() {
-        trainingJob?.cancel()
-        trainingJob = null
-        _state.value = _state.value.copy(isTraining = false)
-    }
-
-    /**
-     * Implements Next-Character prediction using backpropagation over batches,
-     * utilizing up to 16 threads (user configured) on Snapdragon CPU cores.
-     */
-    private suspend fun runBuiltInGenerativeTraining(
-        epochs: Int,
-        batchSize: Int,
-        learningRate: Float,
-        startTime: Long
-    ) = withContext(Dispatchers.Default) {
-
-        val vocabSize = charToId.size
-        if (vocabSize == 0) return@withContext
-
-        // Initialize neural net with 32-dim char embeddings, 64-dim hidden states
-        val net = kotlinGenNet ?: KotlinGenerativeNetwork(
-            vocabSize = vocabSize,
-            contextWindow = contextWindow,
-            embeddingDim = 32,
-            hiddenSize = 64
-        ).also { kotlinGenNet = it }
-
-        val textLength = datasetText.length
-        val maxSamples = textLength - contextWindow - 1
-        if (maxSamples <= 0) return@withContext
-
-        // Prepare training pairs: List of (Context String -> Target Char ID)
-        val samples = mutableListOf<Pair<String, Int>>()
-        for (i in 0 until maxSamples) {
-            val contextStr = datasetText.substring(i, i + contextWindow)
-            val targetChar = datasetText[i + contextWindow]
-            val targetId = charToId[targetChar] ?: 0
-            samples.add(contextStr to targetId)
-        }
-
-        val totalSamples = samples.size
-        val currentHistory = mutableListOf<Float>()
-        var tokensCount = _state.value.totalTokensProcessed
-
-        for (epoch in 1..epochs) {
-            if (!isActive) break
-
-            var totalEpochLoss = 0f
-            var batchCount = 0
-            var correctPredictions = 0
-
-            // Shuffle data per epoch to avoid convergence bias
-            val shuffledSamples = samples.shuffled()
-
-            val threadsToUse = _state.value.numThreads
-
-            val epochStartNs = System.nanoTime()
-
-            // Run mini-batches
-            for (step in 0 until totalSamples step batchSize) {
-                if (!isActive) break
-
-                val end = minOf(step + batchSize, totalSamples)
-                val batchList = shuffledSamples.subList(step, end)
-
-                // Multithreaded gradient computing
-                val loss = net.trainBatch(batchList, charToId, learningRate, threadsToUse)
-                totalEpochLoss += loss
-                batchCount++
-                
-                // Track characters processed as tokens
-                tokensCount += batchList.size
-
-                // Batch evaluation accuracy to track convergence
-                for (sample in batchList) {
-                    val predId = net.predictNextCharId(sample.first, charToId)
-                    if (predId == sample.second) {
-                        correctPredictions++
-                    }
-                }
-            }
-
-            val epochTimeNs = System.nanoTime() - epochStartNs
-
-            // Throughput Speed Calculation (Formula 5):
-            // Formula: Speed (Tokens/Sec) = Delta_Tokens / (Delta_Time_in_Nanoseconds / 1_000_000_000.0)
-            val deltaTokens = totalSamples.toDouble()
-            val deltaTimeInNanoseconds = epochTimeNs.toDouble()
-            val throughputSpeed = if (deltaTimeInNanoseconds > 0) {
-                deltaTokens / (deltaTimeInNanoseconds / 1_000_000_000.0)
-            } else {
-                0.0
-            }
-
-            val avgLoss = totalEpochLoss / batchCount
-            val accuracy = correctPredictions.toFloat() / totalSamples
-            currentHistory.add(avgLoss)
-
-            // Perplexity = exp(Loss)
-            val currentPpl = exp(avgLoss.toDouble()).toFloat()
-
-            val elapsed = SystemClock.elapsedRealtime() - startTime
-
-            // Update weights representations after each epoch
-            val weightsMap = mutableMapOf<Char, Float>()
-            idToChar.forEach { (id, char) ->
-                if (id < net.embeddings.size) {
-                    val emb = net.embeddings[id]
-                    var sumSq = 0f
-                    for (v in emb) sumSq += v * v
-                    weightsMap[char] = kotlin.math.sqrt(sumSq)
-                }
-            }
-
-            // Update UI
-            withContext(Dispatchers.Main) {
-                _state.value = _state.value.copy(
-                    currentEpoch = epoch,
-                    currentLoss = avgLoss,
-                    lossHistory = currentHistory.toList(),
-                    accuracy = accuracy,
-                    elapsedMs = elapsed,
-                    totalTokensProcessed = tokensCount,
-                    currentPerplexity = currentPpl,
-                    characterWeights = weightsMap,
-                    throughputSpeed = throughputSpeed,
-                    logs = _state.value.logs + "Epoch $epoch/$epochs | Cross-Entropy Loss: ${String.format("%.4f", avgLoss)} | PPL: ${String.format("%.2f", currentPpl)} | Match: ${String.format("%.1f%%", accuracy * 100f)} | Speed: ${String.format("%.1f", throughputSpeed)} Tok/s"
-                )
-            }
-
-            delay(15) // prevent total CPU starvation to maintain slick UI responsiveness
-        }
-
-        withContext(Dispatchers.Main) {
-            _state.value = _state.value.copy(
-                isTraining = false,
-                logs = _state.value.logs + "Local text training successfully optimized over Snapdragon silicon!"
-            )
-        }
-    }
-
-    private suspend fun runCustomTfliteGenerativeTraining(
-        epochs: Int,
-        batchSize: Int,
-        learningRate: Float,
-        startTime: Long
-    ) = withContext(Dispatchers.Default) {
-        val interpreter = customInterpreter ?: return@withContext
-        val currentHistory = mutableListOf<Float>()
-        var tokensCount = _state.value.totalTokensProcessed
-
-        for (epoch in 1..epochs) {
-            if (!isActive) break
-
-            var epochLoss = 0f
-            val numSteps = 5
-            for (s in 0 until numSteps) {
-                val inputData = Array(batchSize) { FloatArray(contextWindow) { (it % charToId.size).toFloat() } }
-                val targetData = Array(batchSize) { FloatArray(1) { 1f } }
-
-                val inputs = mapOf("inputs" to inputData, "targets" to targetData)
-                val outputLoss = Array(1) { FloatArray(1) }
-                val outputs = mapOf("loss" to outputLoss)
-
-                try {
-                    interpreter.runSignature(inputs, outputs, "train")
-                    epochLoss += outputLoss[0][0]
-                } catch (e: Exception) {
-                    epochLoss += (1.8f / (epoch + s * 0.1f)).toFloat() + (Math.random() * 0.05f).toFloat()
-                }
-                tokensCount += batchSize
-            }
-
-            val avgLoss = epochLoss / numSteps
-            currentHistory.add(avgLoss)
-            val currentPpl = exp(avgLoss.toDouble()).toFloat()
-
-            val elapsed = SystemClock.elapsedRealtime() - startTime
-            withContext(Dispatchers.Main) {
-                _state.value = _state.value.copy(
-                    currentEpoch = epoch,
-                    currentLoss = avgLoss,
-                    lossHistory = currentHistory,
-                    currentPerplexity = currentPpl,
-                    accuracy = 0.45f + (epoch * 0.02f).coerceAtMost(0.4f),
-                    elapsedMs = elapsed,
-                    totalTokensProcessed = tokensCount,
-                    logs = _state.value.logs + "Custom LiteRT Epoch $epoch/$epochs | Average Loss: ${String.format("%.4f", avgLoss)} | PPL: ${String.format("%.2f", currentPpl)}"
-                )
-            }
-            delay(20)
-        }
-
-        withContext(Dispatchers.Main) {
-            _state.value = _state.value.copy(
-                isTraining = false,
-                logs = _state.value.logs + "LiteRT custom generative signatures optimized successfully."
-            )
-        }
+        WorkManager.getInstance(context).cancelUniqueWork("TAI1_Neural_Training")
+        _state.value = _state.value.copy(
+            isTraining = false,
+            logs = _state.value.logs + "Background training cancellation signal dispatched to WorkManager."
+        )
     }
 
     /**
@@ -747,7 +674,6 @@ class KotlinGenerativeNetwork(
         numThreads: Int
     ): Float {
         val batchSize = batch.size
-
         val dwEmbedding = Array(vocabSize) { FloatArray(embeddingDim) }
         val dwHidden = Array(flattenedInputDim) { FloatArray(hiddenSize) }
         val dbHidden = FloatArray(hiddenSize)

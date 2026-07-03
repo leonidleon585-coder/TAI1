@@ -60,7 +60,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        trainerEngine = TrainerEngine(applicationContext)
+        trainerEngine = TrainerEngine.getInstance(applicationContext)
 
         setContent {
             MyApplicationTheme {

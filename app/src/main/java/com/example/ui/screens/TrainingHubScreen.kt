@@ -226,138 +226,135 @@ fun TrainingHubScreen(
                         fontFamily = FontFamily.Monospace
                     )
                     Text(
-                        text = "Input any website link to extract pure, prose training characters instantly and feed them into the autoregressive weights.",
+                        text = "Input multiple website links (separated by commas or newlines) to extract pure, prose training characters, autonomously discover up to 5 child links per domain, and queue download them sequential-style.",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF9CA3AF)
                     )
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = websiteUrl,
-                            onValueChange = { websiteUrl = it },
-                            placeholder = { Text("https://example.com/corpus", color = Color.Gray, style = MaterialTheme.typography.bodySmall) },
-                            singleLine = true,
-                            enabled = !isScraping && !state.isTraining,
-                            modifier = Modifier
-                                .weight(1f)
-                                .height(56.dp),
-                            shape = RoundedCornerShape(8.dp),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = Color(0xFF10B981),
-                                unfocusedBorderColor = Color(0xFF334155),
-                                focusedLabelColor = Color(0xFF10B981)
-                            )
+                    val queueIsProcessing = state.activeUrlProcessing != "Idle" && state.activeUrlProcessing != "Completed" && state.activeUrlProcessing != ""
+
+                    OutlinedTextField(
+                        value = websiteUrl,
+                        onValueChange = { websiteUrl = it },
+                        placeholder = { Text("https://example.com/blog\nhttps://example.com/docs", color = Color.Gray, style = MaterialTheme.typography.bodySmall) },
+                        singleLine = false,
+                        maxLines = 4,
+                        enabled = !queueIsProcessing && !state.isTraining,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(100.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = Color(0xFF10B981),
+                            unfocusedBorderColor = Color(0xFF334155),
+                            focusedLabelColor = Color(0xFF10B981)
                         )
+                    )
 
-                        Spacer(modifier = Modifier.width(8.dp))
-
-                        Button(
-                            onClick = {
-                                if (websiteUrl.trim().isEmpty()) {
-                                    Toast.makeText(context, "Please enter a valid URL first.", Toast.LENGTH_SHORT).show()
-                                    return@Button
-                                }
-                                isScraping = true
-                                scope.launch {
-                                    try {
-                                        val cleanText = WebScraper.fetchAndSanitize(websiteUrl)
-                                        scrapedPreviewText = cleanText
-                                        showPreviewWindow = true
-                                        Toast.makeText(context, "Scraped web page successfully!", Toast.LENGTH_SHORT).show()
-                                    } catch (e: Exception) {
-                                        Toast.makeText(context, "Failed to scrape page: ${e.message}", Toast.LENGTH_LONG).show()
-                                    } finally {
-                                        isScraping = false
-                                    }
-                                }
-                            },
-                            enabled = !isScraping && !state.isTraining,
-                            modifier = Modifier.height(56.dp),
-                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            if (isScraping) {
-                                CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color.Black, strokeWidth = 2.dp)
-                            } else {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.Send,
-                                    contentDescription = "Scrape url content",
-                                    tint = Color.Black,
-                                    modifier = Modifier.size(18.dp)
-                                )
+                    Button(
+                        onClick = {
+                            if (websiteUrl.trim().isEmpty()) {
+                                Toast.makeText(context, "Please enter valid URLs first.", Toast.LENGTH_SHORT).show()
+                                return@Button
                             }
+                            trainerEngine.processScraperQueue(websiteUrl)
+                        },
+                        enabled = !queueIsProcessing && !state.isTraining,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        if (queueIsProcessing) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), color = Color.Black, strokeWidth = 2.dp)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("INGESTING QUEUE...", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color.Black)
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.CloudDownload,
+                                contentDescription = "Scrape queue content",
+                                tint = Color.Black,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("RUN SCRApER QUEUE", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color.Black, fontFamily = FontFamily.Monospace)
                         }
                     }
+                }
+            }
+        }
 
-                    // Animated Dataset Preview Window
-                    AnimatedVisibility(
-                        visible = showPreviewWindow && scrapedPreviewText.isNotEmpty(),
-                        enter = fadeIn(),
-                        exit = fadeOut()
+        // Background Queue Status Dashboard Indicators
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
+                border = BorderStroke(1.dp, Color(0xFF1E293B))
+            ) {
+                Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "Background Queue Status",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF10B981),
+                        fontFamily = FontFamily.Monospace
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(Color(0xFF030712), RoundedCornerShape(8.dp))
-                                .border(1.dp, Color(0xFF10B981).copy(alpha = 0.4f), RoundedCornerShape(8.dp))
-                                .padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        MiniDashboardMetric(
+                            title = "Tokens Downloaded",
+                            value = if (state.totalTokensDownloaded > 0) String.format("%,d", state.totalTokensDownloaded) else "0",
+                            icon = Icons.Default.DownloadDone,
+                            modifier = Modifier.weight(1f)
+                        )
+
+                        MiniDashboardMetric(
+                            title = "Links in Queue",
+                            value = "${state.discoveredLinksInQueue} URLs",
+                            icon = Icons.Default.Link,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(Color(0xFF030712), RoundedCornerShape(8.dp))
+                            .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(8.dp))
+                            .padding(12.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "Dataset Ingestion Preview (${scrapedPreviewText.length} chars)",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF10B981),
-                                    fontFamily = FontFamily.Monospace
-                                )
-                                IconButton(
-                                    onClick = { showPreviewWindow = false },
-                                    modifier = Modifier.size(24.dp)
-                                ) {
-                                    Icon(imageVector = Icons.Default.Close, contentDescription = "Close preview", tint = Color.Gray, modifier = Modifier.size(14.dp))
-                                }
-                            }
-                            
+                            val isActive = state.activeUrlProcessing != "Idle" && state.activeUrlProcessing != "Completed" && state.activeUrlProcessing != ""
                             Box(
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(110.dp)
-                                    .background(Color(0xFF0F172A), RoundedCornerShape(6.dp))
-                                    .border(1.dp, Color(0xFF1E293B), RoundedCornerShape(6.dp))
-                                    .padding(8.dp)
-                            ) {
+                                    .size(8.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(if (isActive) Color(0xFF10B981) else Color.Gray)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column {
                                 Text(
-                                    text = scrapedPreviewText,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = Color.LightGray,
+                                    text = "Active URL Processing",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.Gray,
                                     fontFamily = FontFamily.Monospace
                                 )
-                            }
-
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End
-                            ) {
-                                Button(
-                                    onClick = {
-                                        trainerEngine.loadWebScrapedDataset(scrapedPreviewText, websiteUrl)
-                                        showPreviewWindow = false
-                                        Toast.makeText(context, "Loaded into model vocabulary queue!", Toast.LENGTH_SHORT).show()
-                                    },
-                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
-                                    shape = RoundedCornerShape(6.dp),
-                                    modifier = Modifier.height(36.dp)
-                                ) {
-                                    Text("Inject Scraped Text", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold, color = Color.Black)
-                                }
+                                Text(
+                                    text = state.activeUrlProcessing,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White,
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 1
+                                )
                             }
                         }
                     }
