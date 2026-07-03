@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.TrendingDown
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -74,13 +75,13 @@ fun MainScreen(trainerEngine: TrainerEngine, modifier: Modifier = Modifier) {
     val state by trainerEngine.state.collectAsState()
 
     // Hyperparameters states
-    var learningRateStr by remember { mutableStateOf("0.01") }
-    var epochsStr by remember { mutableStateOf("10") }
-    var batchSizeStr by remember { mutableStateOf("16") }
+    var learningRateStr by remember { mutableStateOf("0.02") }
+    var epochsStr by remember { mutableStateOf("15") }
+    var batchSizeStr by remember { mutableStateOf("32") }
 
     // Playground state
-    var playgroundInput by remember { mutableStateOf("This local neural network optimizer works phenomenally well!") }
-    var playgroundOutput by remember { mutableStateOf("Click Evaluate to run real-time inference.") }
+    var playgroundInput by remember { mutableStateOf("deep inside") }
+    var playgroundOutput by remember { mutableStateOf("Click Generate to run auto-regressive prediction locally.") }
 
     // File pickers launchers
     val datasetPicker = rememberLauncherForActivityResult(
@@ -154,9 +155,9 @@ fun MainScreen(trainerEngine: TrainerEngine, modifier: Modifier = Modifier) {
                     onEpochsChange = { epochsStr = it },
                     onBatchSizeChange = { batchSizeStr = it },
                     onStartTraining = {
-                        val lr = learningRateStr.toFloatOrNull() ?: 0.01f
-                        val ep = epochsStr.toIntOrNull() ?: 10
-                        val bs = batchSizeStr.toIntOrNull() ?: 16
+                        val lr = learningRateStr.toFloatOrNull() ?: 0.02f
+                        val ep = epochsStr.toIntOrNull() ?: 15
+                        val bs = batchSizeStr.toIntOrNull() ?: 32
                         
                         if (lr <= 0f || ep <= 0 || bs <= 0) {
                             Toast.makeText(context, "Invalid hyperparameters specified.", Toast.LENGTH_SHORT).show()
@@ -187,7 +188,7 @@ fun MainScreen(trainerEngine: TrainerEngine, modifier: Modifier = Modifier) {
                     playgroundOutput = playgroundOutput,
                     onInputChange = { playgroundInput = it },
                     onEvaluate = {
-                        playgroundOutput = trainerEngine.runInference(playgroundInput)
+                        playgroundOutput = trainerEngine.generateText(playgroundInput, length = 80)
                     }
                 )
             }
@@ -506,7 +507,7 @@ fun TrainingDashboardCard(state: TrainingState) {
                 MetricCard(
                     title = "Live Loss",
                     value = if (state.currentLoss > 0f) String.format("%.4f", state.currentLoss) else "0.0000",
-                    icon = Icons.Default.TrendingDown,
+                    icon = Icons.AutoMirrored.Filled.TrendingDown,
                     modifier = Modifier.weight(1f)
                 )
             }
@@ -778,7 +779,7 @@ fun PlaygroundCard(
                 color = MaterialTheme.colorScheme.primary
             )
             Text(
-                text = "Enter sentences to evaluate if the model outputs a positive or negative prediction offline.",
+                text = "Enter a seed phrase to predict and append the next 50-100 characters locally based on its weights.",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.Gray
             )
@@ -787,7 +788,7 @@ fun PlaygroundCard(
                 value = playgroundInput,
                 onValueChange = onInputChange,
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text("E.g., This model is incredibly optimized on device!", color = Color.Gray) },
+                placeholder = { Text("E.g., deep inside", color = Color.Gray) },
                 shape = RoundedCornerShape(8.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = MaterialTheme.colorScheme.primary,
@@ -803,9 +804,9 @@ fun PlaygroundCard(
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary),
                 shape = RoundedCornerShape(8.dp)
             ) {
-                Icon(imageVector = Icons.Default.FlashOn, contentDescription = "Evaluate weights icon")
+                Icon(imageVector = Icons.Default.FlashOn, contentDescription = "Generate text icon")
                 Spacer(modifier = Modifier.width(6.dp))
-                Text("EVALUATE PREDICTIONS", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                Text("GENERATE TEXT PREDICTION", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
             }
 
             Box(
