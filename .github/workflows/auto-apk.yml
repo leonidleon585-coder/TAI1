@@ -1,0 +1,59 @@
+name: Generate APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout project code
+      uses: actions/checkout@v4
+    
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    # Ставим ровно 9.3.1, чтобы удовлетворить AGP 9.1.1 и не сломать KSP
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: 9.3.1
+
+    - name: Generate Debug Keystore and Build
+      run: |
+        # Находим, где лежит build.gradle
+        BUILD_FILE=$(find . -name "build.gradle*" -print -quit)
+        if [ -z "$BUILD_FILE" ]; then
+          echo "Ошибка: Проект Android не найден!"
+          exit 1
+        fi
+        
+        SUB_DIR=$(dirname "$BUILD_FILE")
+        echo "Проект найден в папке: $SUB_DIR"
+        cd "$SUB_DIR"
+        
+        # Генерируем тестовый debug.keystore, чтобы не было ошибок валидации
+        keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+        
+        # Запускаем компиляцию проекта
+        gradle assembleDebug
+        
+        # Переносим APK в папку артефактов
+        mkdir -p $GITHUB_WORKSPACE/output_apk
+        APK_PATH=$(find . -name "*.apk" -print -quit)
+        if [ -z "$APK_PATH" ]; then
+          echo "Ошибка: APK не скомпилировался!"
+          exit 1
+        fi
+        cp "$APK_PATH" $GITHUB_WORKSPACE/output_apk/app-debug.apk
+
+    - name: Upload Finished APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: Project-APK
+        path: output_apk/app-debug.apk
