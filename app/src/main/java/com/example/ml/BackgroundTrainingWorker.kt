@@ -87,8 +87,8 @@ class BackgroundTrainingWorker(
         val net = trainerEngine.kotlinGenNet ?: KotlinGenerativeNetwork(
             vocabSize = vocabSize,
             contextWindow = trainerEngine.contextWindow,
-            embeddingDim = 32,
-            hiddenSize = 64
+            embeddingDim = 64,
+            hiddenSize = 128
         ).also { trainerEngine.kotlinGenNet = it }
 
         val textLength = trainerEngine.datasetText.length
@@ -119,6 +119,9 @@ class BackgroundTrainingWorker(
             val threadsToUse = trainerEngine.state.value.numThreads
             val epochStartNs = System.nanoTime()
 
+            // Apply exponential learning rate decay scheduler to refine optimization as epochs progress
+            val epochLearningRate = (learningRate * java.lang.Math.pow(0.92, (epoch - 1).toDouble())).toFloat().coerceAtLeast(0.002f)
+
             // Run mini-batches
             for (step in 0 until totalSamples step batchSize) {
                 if (isStopped) break
@@ -127,7 +130,7 @@ class BackgroundTrainingWorker(
                 val batchList = shuffledSamples.subList(step, end)
 
                 val loss = try {
-                    net.trainBatch(batchList, charToId, learningRate, threadsToUse)
+                    net.trainBatch(batchList, charToId, epochLearningRate, threadsToUse)
                 } catch (e: Exception) {
                     android.util.Log.e("BackgroundTraining", "Mini-batch failure caught: ${e.message}", e)
                     0.5f // Skip corrupted batch step gracefully using constant baseline loss

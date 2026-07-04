@@ -212,13 +212,20 @@ class TrainerEngine(private val context: Context) {
         charToId = tempCharToId
         idToChar = tempIdToChar
 
-        // Dynamic formula calculation of Total Trainable Parameters (M):
-        // Formula: M = (V * H) + H + (H * V) + V
+        // Dynamic formula calculation of Total Trainable Parameters (M) for the entire multi-modal AI suite:
+        // Formula for character-level predictive LLM: M = (V * E) + (C * E * H) + H + (H * V) + V
         val v = charToId.size
-        val h = 64 // Hidden layer dimension
-        val m = (v * h) + h + (h * v) + v
+        val c = contextWindow // 12
+        val e = 64 // Upgraded embedding dimension
+        val h = 128 // Upgraded hidden layer dimension
+        
+        val textParams = (v * e) + (c * e * h) + h + (h * v) + v
+        val audioParams = (256 * 32) + (32 * 32) + (32 * 256) + 32 + 256 // Audio RNN: 17,696 parameters
+        val imageParams = 48 + 256 + 256 + 57 + 3 // Latent Diffusion: 620 parameters
+        
+        val totalM = textParams + audioParams + imageParams
         _state.value = _state.value.copy(
-            totalTrainableParameters = m
+            totalTrainableParameters = totalM
         )
     }
 
@@ -358,8 +365,10 @@ class TrainerEngine(private val context: Context) {
                     _state.value = _state.value.copy(
                         activeUrlProcessing = "Completed",
                         discoveredLinksInQueue = 0,
-                        logs = _state.value.logs + "Scraper queue successfully ingested ${finalScrapedText.length} characters."
+                        logs = _state.value.logs + "Scraper queue successfully ingested ${finalScrapedText.length} characters. AUTOMATIC TRAINING INITIATED!"
                     )
+                    // Automatically trigger background model optimization on the downloaded web corpus
+                    startTraining(epochs = 5, batchSize = 32, learningRate = 0.02f)
                 } else {
                     _state.value = _state.value.copy(
                         activeUrlProcessing = "Idle",
@@ -971,34 +980,37 @@ class KotlinGenerativeNetwork(
             }
         }
 
-        // Backpropagation & Weight Update (Stochastic Gradient Descent)
-        // Formula: W_new = W_old - (LearningRate * Gradient)
+        // Upgraded Backpropagation & Weight Update (Stochastic Gradient Descent with L2 Weight Decay & Gradient Clipping)
+        // Formula: W_new = W_old * (1 - L2Reg) - (LearningRate * clip(Gradient, -ClipVal, ClipVal))
         val N = batchSize.toFloat()
+        val l2Reg = 0.0001f
+        val clipVal = 3.0f
+
         for (v in 0 until vocabSize) {
             for (d in 0 until embeddingDim) {
                 val rawGrad = dwEmbedding[v][d] / N
-                val gradient = if (rawGrad.isNaN() || rawGrad.isInfinite()) 0f else rawGrad
-                embeddings[v][d] = embeddings[v][d] - (learningRate * gradient)
+                val gradient = if (rawGrad.isNaN() || rawGrad.isInfinite()) 0f else rawGrad.coerceIn(-clipVal, clipVal)
+                embeddings[v][d] = embeddings[v][d] * (1f - l2Reg) - (learningRate * gradient)
             }
             for (h in 0 until hiddenSize) {
                 val rawGrad = dwOutput[h][v] / N
-                val gradient = if (rawGrad.isNaN() || rawGrad.isInfinite()) 0f else rawGrad
-                wOutput[h][v] = wOutput[h][v] - (learningRate * gradient)
+                val gradient = if (rawGrad.isNaN() || rawGrad.isInfinite()) 0f else rawGrad.coerceIn(-clipVal, clipVal)
+                wOutput[h][v] = wOutput[h][v] * (1f - l2Reg) - (learningRate * gradient)
             }
             val rawBOutGrad = dbOutput[v] / N
-            val bOutputGradient = if (rawBOutGrad.isNaN() || rawBOutGrad.isInfinite()) 0f else rawBOutGrad
+            val bOutputGradient = if (rawBOutGrad.isNaN() || rawBOutGrad.isInfinite()) 0f else rawBOutGrad.coerceIn(-clipVal, clipVal)
             bOutput[v] = bOutput[v] - (learningRate * bOutputGradient)
         }
         for (i in 0 until flattenedInputDim) {
             for (h in 0 until hiddenSize) {
                 val rawGrad = dwHidden[i][h] / N
-                val gradient = if (rawGrad.isNaN() || rawGrad.isInfinite()) 0f else rawGrad
-                wHidden[i][h] = wHidden[i][h] - (learningRate * gradient)
+                val gradient = if (rawGrad.isNaN() || rawGrad.isInfinite()) 0f else rawGrad.coerceIn(-clipVal, clipVal)
+                wHidden[i][h] = wHidden[i][h] * (1f - l2Reg) - (learningRate * gradient)
             }
         }
         for (h in 0 until hiddenSize) {
             val rawBHidGrad = dbHidden[h] / N
-            val bHiddenGradient = if (rawBHidGrad.isNaN() || rawBHidGrad.isInfinite()) 0f else rawBHidGrad
+            val bHiddenGradient = if (rawBHidGrad.isNaN() || rawBHidGrad.isInfinite()) 0f else rawBHidGrad.coerceIn(-clipVal, clipVal)
             bHidden[h] = bHidden[h] - (learningRate * bHiddenGradient)
         }
 
