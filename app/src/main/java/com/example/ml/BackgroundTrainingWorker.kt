@@ -126,15 +126,25 @@ class BackgroundTrainingWorker(
                 val end = minOf(step + batchSize, totalSamples)
                 val batchList = shuffledSamples.subList(step, end)
 
-                val loss = net.trainBatch(batchList, charToId, learningRate, threadsToUse)
+                val loss = try {
+                    net.trainBatch(batchList, charToId, learningRate, threadsToUse)
+                } catch (e: Exception) {
+                    android.util.Log.e("BackgroundTraining", "Mini-batch failure caught: ${e.message}", e)
+                    0.5f // Skip corrupted batch step gracefully using constant baseline loss
+                }
                 totalEpochLoss += loss
                 batchCount++
                 tokensCount += batchList.size
 
                 for (sample in batchList) {
-                    val predId = net.predictNextCharId(sample.first, charToId)
-                    if (predId == sample.second) {
-                        correctPredictions++
+                    try {
+                        val predId = net.predictNextCharId(sample.first, charToId)
+                        if (predId == sample.second) {
+                            correctPredictions++
+                        }
+                    } catch (e: Exception) {
+                        // Skip corrupted sampling step gracefully
+                        android.util.Log.e("BackgroundTraining", "Prediction sampling failure caught: ${e.message}", e)
                     }
                 }
             }

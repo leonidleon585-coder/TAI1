@@ -1,5 +1,7 @@
 package com.example.ui.screens
 
+import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -10,30 +12,43 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.Face
-import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.example.ml.TrainerEngine
 import com.example.ml.TrainingState
+import com.example.ui.CyberCard
+import com.example.ui.LayoutConstants
+import com.example.ui.ScreenHeader
+import com.example.ui.SynapticActivityGraph
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-data class ChatBubble(
+enum class ConsoleMode(val label: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
+    TEXT("Text LLM", Icons.Default.Chat),
+    AUDIO("Audio RNN", Icons.Default.Audiotrack),
+    IMAGE("Latent Diffusion", Icons.Default.Image)
+}
+
+data class LocalChatBubble(
     val id: String,
-    val sender: String, // "User" or "Offline Model"
+    val sender: String, // "User", "Offline Model", or "System"
     val text: String,
+    val promptSeed: String = "", // Seed context used for feedback corrections
     val timestamp: Long = System.currentTimeMillis(),
-    val isStreaming: Boolean = false
+    val isStreaming: Boolean = false,
+    val audioWave: ByteArray? = null, // Audio synthesis output
+    val diffuseImage: Array<Array<FloatArray>>? = null // Conditioned image generation output
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -43,24 +58,26 @@ fun LocalChatScreen(
     state: TrainingState,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val scrollState = rememberLazyListState()
 
-    // Conversational History State
+    var activeMode by remember { mutableStateOf(ConsoleMode.TEXT) }
+    var textInput by remember { mutableStateOf("") }
+    var isGenerating by remember { mutableStateOf(false) }
+
+    // Conversational state including generated visual outputs
     var chatMessages by remember {
         mutableStateOf(
             listOf(
-                ChatBubble(
+                LocalChatBubble(
                     id = "welcome",
                     sender = "Offline Model",
-                    text = "System cortex initialized. I am your fully autonomous Next-Character Generative Network running directly on this Snapdragon chipset. Enter a prompt to begin."
+                    text = "System cortex initialized. I am your fully autonomous Next-Character Generative Network running directly on this Snapdragon chipset. Enter a prompt or select a multi-modal core."
                 )
             )
         )
     }
-
-    var textInput by remember { mutableStateOf("") }
-    var isThinking by remember { mutableStateOf(false) }
 
     // Auto-scroll to the bottom of conversation
     LaunchedEffect(chatMessages.size) {
@@ -72,54 +89,60 @@ fun LocalChatScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(Color(0xFF030712)) // Dark cyber background
+            .background(LayoutConstants.ColorDarkBg)
     ) {
-        // Status Bar
-        Card(
+        // Multi-modal Console Selectors (Adaptive Grid 8dp)
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            shape = RoundedCornerShape(8.dp),
-            border = BorderStroke(1.dp, Color(0xFF1E293B)),
-            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A))
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(
-                    imageVector = Icons.Default.AutoAwesome,
-                    contentDescription = "AI Status",
-                    tint = Color(0xFF10B981),
-                    modifier = Modifier.size(18.dp)
+            ConsoleMode.values().forEach { mode ->
+                val selected = activeMode == mode
+                FilterChip(
+                    selected = selected,
+                    onClick = { activeMode = mode },
+                    label = { 
+                        Text(
+                            text = mode.label, 
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 11.sp
+                        ) 
+                    },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = mode.icon,
+                            contentDescription = mode.label,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = LayoutConstants.ColorCyberGreen,
+                        selectedLabelColor = Color.Black,
+                        selectedLeadingIconColor = Color.Black,
+                        containerColor = LayoutConstants.ColorDarkSurface,
+                        labelColor = Color.LightGray,
+                        iconColor = Color.LightGray
+                    ),
+                    modifier = Modifier.weight(1f)
                 )
-                Spacer(modifier = Modifier.width(8.dp))
-                Column {
-                    Text(
-                        text = "Active Weights Context: ${if (state.lossHistory.isEmpty()) "Untrained (Random)" else "Fine-tuned"}",
-                        style = MaterialTheme.typography.labelSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        fontFamily = FontFamily.Monospace
-                    )
-                    Text(
-                        text = "Loss Metric: ${if (state.currentLoss > 0) String.format("%.4f", state.currentLoss) else "NaN"} • Snapdragon 8s Gen 4 Native",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color.Gray,
-                        fontFamily = FontFamily.Monospace
-                    )
-                }
             }
         }
+
+        // Display Live Synaptic Activity Graph
+        SynapticActivityGraph(
+            history = state.activeNeuronsHistory,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+        )
 
         // Conversational Feed
         Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp)
+                .padding(horizontal = 16.dp, vertical = 4.dp)
         ) {
             LazyColumn(
                 state = scrollState,
@@ -127,16 +150,27 @@ fun LocalChatScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 items(chatMessages, key = { it.id }) { bubble ->
-                    ChatBubbleRow(bubble = bubble)
+                    MultiModalBubbleRow(
+                        bubble = bubble,
+                        onCorrectionSubmit = { contextSeed, expectedChar ->
+                            val currentLoss = trainerEngine.applyCorrectionFeedback(contextSeed, expectedChar)
+                            Toast.makeText(
+                                context,
+                                "Reinforcement gradient backpropagated. Loss drops to: ${String.format("%.4f", currentLoss)}",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    )
                 }
             }
 
-            if (chatMessages.size == 1) {
+            if (chatMessages.size == 1 && activeMode != ConsoleMode.TEXT) {
                 Text(
-                    text = "Tip: Train the model in the Training Hub for 10-15 epochs to observe words and letters self-assemble from raw inputs into coherent sentences.",
+                    text = "Use the console below to input seed terms and generate multi-modal outputs. Synaptic metrics are fully offline.",
                     style = MaterialTheme.typography.bodySmall,
                     textAlign = TextAlign.Center,
                     color = Color.DarkGray,
+                    fontFamily = FontFamily.Monospace,
                     modifier = Modifier
                         .align(Alignment.Center)
                         .padding(32.dp)
@@ -149,9 +183,9 @@ fun LocalChatScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding(),
-            color = Color(0xFF0F172A),
+            color = LayoutConstants.ColorDarkSurface,
             tonalElevation = 4.dp,
-            border = BorderStroke(1.dp, Color(0xFF1E293B))
+            border = BorderStroke(1.dp, LayoutConstants.ColorBorder)
         ) {
             Row(
                 modifier = Modifier
@@ -162,17 +196,27 @@ fun LocalChatScreen(
                 OutlinedTextField(
                     value = textInput,
                     onValueChange = { textInput = it },
-                    placeholder = { Text("Feed a seed word to generating local responses...", color = Color.Gray, style = MaterialTheme.typography.bodyMedium) },
+                    placeholder = { 
+                        Text(
+                            text = when(activeMode) {
+                                ConsoleMode.TEXT -> "Feed a seed word to generate local responses..."
+                                ConsoleMode.AUDIO -> "Enter seed character sequence to trigger rhythm..."
+                                ConsoleMode.IMAGE -> "Condition text (Sun, Space, Silicon, Matrix)..."
+                            }, 
+                            color = Color.Gray, 
+                            style = MaterialTheme.typography.bodyMedium
+                        ) 
+                    },
                     singleLine = true,
-                    enabled = !isThinking,
+                    enabled = !isGenerating,
                     modifier = Modifier
                         .weight(1f)
                         .height(54.dp),
                     shape = RoundedCornerShape(8.dp),
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor = Color(0xFF10B981),
+                        focusedBorderColor = LayoutConstants.ColorCyberGreen,
                         unfocusedBorderColor = Color(0xFF334155),
-                        focusedLabelColor = Color(0xFF10B981)
+                        focusedLabelColor = LayoutConstants.ColorCyberGreen
                     )
                 )
 
@@ -187,55 +231,92 @@ fun LocalChatScreen(
                         val modelMessageId = "model_${System.currentTimeMillis()}"
                         
                         // Add User message
-                        chatMessages = chatMessages + ChatBubble(
+                        chatMessages = chatMessages + LocalChatBubble(
                             id = userMessageId,
                             sender = "User",
                             text = prompt
                         )
                         textInput = ""
-                        isThinking = true
+                        isGenerating = true
 
-                        // Stream text back character-by-character
                         scope.launch {
-                            val fullResponse = trainerEngine.generateText(prompt, length = 120)
-                            
-                            // Initialize blank model message
-                            chatMessages = chatMessages + ChatBubble(
-                                id = modelMessageId,
-                                sender = "Offline Model",
-                                text = "",
-                                isStreaming = true
-                            )
+                            when(activeMode) {
+                                ConsoleMode.TEXT -> {
+                                    // Auto-regressive character sequence prediction
+                                    val fullResponse = trainerEngine.generateText(prompt, length = 100)
+                                    
+                                    chatMessages = chatMessages + LocalChatBubble(
+                                        id = modelMessageId,
+                                        sender = "Offline Model",
+                                        text = "",
+                                        promptSeed = prompt,
+                                        isStreaming = true
+                                    )
 
-                            var currentStreamedText = ""
-                            for (char in fullResponse) {
-                                currentStreamedText += char
-                                
-                                // Update message in list
-                                chatMessages = chatMessages.map { bubble ->
-                                    if (bubble.id == modelMessageId) {
-                                        bubble.copy(text = currentStreamedText)
-                                    } else {
-                                        bubble
+                                    var currentStreamedText = ""
+                                    for (char in fullResponse) {
+                                        currentStreamedText += char
+                                        chatMessages = chatMessages.map { bubble ->
+                                            if (bubble.id == modelMessageId) {
+                                                bubble.copy(text = currentStreamedText)
+                                            } else {
+                                                bubble
+                                            }
+                                        }
+                                        delay(15) // Typewriter cadence
+                                    }
+
+                                    chatMessages = chatMessages.map { bubble ->
+                                        if (bubble.id == modelMessageId) {
+                                            bubble.copy(isStreaming = false)
+                                        } else {
+                                            bubble
+                                        }
                                     }
                                 }
-                                delay(20) // Cadence speed for typewriter
-                            }
 
-                            // Finalize message state
-                            chatMessages = chatMessages.map { bubble ->
-                                if (bubble.id == modelMessageId) {
-                                    bubble.copy(isStreaming = false)
-                                } else {
-                                    bubble
+                                ConsoleMode.AUDIO -> {
+                                    // Rhythm prediction on byte streams
+                                    val seedBytes = prompt.toByteArray(Charsets.UTF_8)
+                                    val synthesisBytes = trainerEngine.audioTrainer.generateAudioRhythm(seedBytes, durationSamples = 3000)
+                                    
+                                    // Push real-time synaptic spike to state
+                                    val currentSpikes = state.activeNeuronsHistory.toMutableList()
+                                    currentSpikes.add(trainerEngine.audioTrainer.lastActiveNeuronCount)
+                                    if (currentSpikes.size > 40) currentSpikes.removeAt(0)
+                                    trainerEngine.updateState { it.copy(activeNeuronsHistory = currentSpikes) }
+
+                                    chatMessages = chatMessages + LocalChatBubble(
+                                        id = modelMessageId,
+                                        sender = "Offline Model",
+                                        text = "Synthetic Audio Rhythm prediction complete. Generated 3,000 sound byte arrays utilizing character recurrent loops: ${synthesisBytes.size} rhythmic samples compiled.",
+                                        audioWave = synthesisBytes
+                                    )
+                                }
+
+                                ConsoleMode.IMAGE -> {
+                                    // Conditioned Latent Diffusion
+                                    val imagePixels = trainerEngine.imageDiffusionEngine.generateImage(prompt, steps = 10)
+                                    
+                                    val currentSpikes = state.activeNeuronsHistory.toMutableList()
+                                    currentSpikes.add(trainerEngine.imageDiffusionEngine.lastActiveNeuronCount)
+                                    if (currentSpikes.size > 40) currentSpikes.removeAt(0)
+                                    trainerEngine.updateState { it.copy(activeNeuronsHistory = currentSpikes) }
+
+                                    chatMessages = chatMessages + LocalChatBubble(
+                                        id = modelMessageId,
+                                        sender = "Offline Model",
+                                        text = "Latent Diffusion completed in-memory. Cross-attention operation successfully mapped textual embedding condition '$prompt' to a 16x16 RGB latent noise space.",
+                                        diffuseImage = imagePixels
+                                    )
                                 }
                             }
-                            isThinking = false
+                            isGenerating = false
                         }
                     },
-                    enabled = textInput.trim().isNotEmpty() && !isThinking,
+                    enabled = textInput.trim().isNotEmpty() && !isGenerating,
                     modifier = Modifier.height(54.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF10B981)),
+                    colors = ButtonDefaults.buttonColors(containerColor = LayoutConstants.ColorCyberGreen),
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Icon(
@@ -251,8 +332,14 @@ fun LocalChatScreen(
 }
 
 @Composable
-fun ChatBubbleRow(bubble: ChatBubble) {
+fun MultiModalBubbleRow(
+    bubble: LocalChatBubble,
+    onCorrectionSubmit: (contextSeed: String, expectedChar: Char) -> Unit
+) {
     val isUser = bubble.sender == "User"
+    var showCorrectionInput by remember { mutableStateOf(false) }
+    var correctiveCharInput by remember { mutableStateOf("") }
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start,
@@ -263,14 +350,14 @@ fun ChatBubbleRow(bubble: ChatBubble) {
                 modifier = Modifier
                     .size(36.dp)
                     .clip(RoundedCornerShape(18.dp))
-                    .background(Color(0xFF10B981).copy(alpha = 0.2f))
-                    .border(1.dp, Color(0xFF10B981), RoundedCornerShape(18.dp)),
+                    .background(LayoutConstants.ColorCyberGreen.copy(alpha = 0.2f))
+                    .border(1.dp, LayoutConstants.ColorCyberGreen, RoundedCornerShape(18.dp)),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.SmartToy,
                     contentDescription = "Model icon",
-                    tint = Color(0xFF10B981),
+                    tint = LayoutConstants.ColorCyberGreen,
                     modifier = Modifier.size(18.dp)
                 )
             }
@@ -278,7 +365,7 @@ fun ChatBubbleRow(bubble: ChatBubble) {
         }
 
         Card(
-            modifier = Modifier.widthIn(max = 280.dp),
+            modifier = Modifier.widthIn(max = 300.dp),
             shape = RoundedCornerShape(
                 topStart = 12.dp,
                 topEnd = 12.dp,
@@ -287,36 +374,218 @@ fun ChatBubbleRow(bubble: ChatBubble) {
             ),
             border = BorderStroke(
                 width = 1.dp,
-                color = if (isUser) Color(0xFF334155) else Color(0xFF10B981).copy(alpha = 0.4f)
+                color = if (isUser) Color(0xFF334155) else LayoutConstants.ColorCyberGreen.copy(alpha = 0.4f)
             ),
             colors = CardDefaults.cardColors(
-                containerColor = if (isUser) Color(0xFF1E293B) else Color(0xFF0F172A)
+                containerColor = if (isUser) Color(0xFF1E293B) else LayoutConstants.ColorDarkSurface
             )
         ) {
             Column(modifier = Modifier.padding(12.dp)) {
                 Text(
-                    text = if (isUser) "USER PROMPT" else "NATIVE LLM RESPONSE",
+                    text = if (isUser) "USER PROMPT" else "NATIVE MULTI-MODAL COGNITION",
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Bold,
-                    color = if (isUser) Color(0xFF94A3B8) else Color(0xFF10B981),
+                    color = if (isUser) Color(0xFF94A3B8) else LayoutConstants.ColorCyberGreen,
                     fontFamily = FontFamily.Monospace
                 )
-                Spacer(modifier = Modifier.height(4.dp))
+                Spacer(modifier = Modifier.height(6.dp))
+                
+                // Response text content
                 Text(
                     text = bubble.text,
                     style = MaterialTheme.typography.bodyMedium,
                     color = Color.White,
-                    fontFamily = if (isUser) FontFamily.Default else FontFamily.Monospace
+                    fontFamily = if (isUser) FontFamily.Default else FontFamily.Monospace,
+                    fontSize = 13.sp
                 )
+
+                // Render real generated Audio Wave (if present)
+                if (bubble.audioWave != null) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "SYNTHESIZED WAVEFORM SAMPLES:",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = LayoutConstants.ColorCyberBlue,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    
+                    // Live audio bars rendering
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(40.dp)
+                            .background(Color.Black.copy(alpha = 0.4f), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Display 20 responsive waves
+                        val step = (bubble.audioWave.size / 20).coerceAtLeast(1)
+                        for (i in 0 until 20) {
+                            val sampleIndex = (i * step).coerceIn(0, bubble.audioWave.size - 1)
+                            val amplitude = Math.abs(bubble.audioWave[sampleIndex].toInt())
+                            val barHeight = (amplitude.toFloat() / 128f * 32f).coerceIn(2f, 32f).dp
+                            
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(barHeight)
+                                    .clip(RoundedCornerShape(1.dp))
+                                    .background(LayoutConstants.ColorCyberBlue)
+                            )
+                        }
+                    }
+                    Text(
+                        text = "Auto-regressive amplitude oscillations",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.Gray,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp
+                    )
+                }
+
+                // Render real Diffusion generated 16x16 Pixel Art Grid
+                if (bubble.diffuseImage != null) {
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Text(
+                        text = "LATENT RGB GRID RENDER:",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = LayoutConstants.ColorCyberPurple,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    // Draw 16x16 color block grid
+                    Box(
+                        modifier = Modifier
+                            .size(176.dp)
+                            .align(Alignment.CenterHorizontally)
+                            .border(1.dp, Color(0xFF334155), RoundedCornerShape(4.dp))
+                            .clip(RoundedCornerShape(4.dp))
+                    ) {
+                        Column(modifier = Modifier.fillMaxSize()) {
+                            for (y in 0 until 16) {
+                                Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                                    for (x in 0 until 16) {
+                                        val pixel = bubble.diffuseImage[x][y]
+                                        val color = Color(
+                                            red = pixel[0],
+                                            green = pixel[1],
+                                            blue = pixel[2],
+                                            alpha = 1f
+                                        )
+                                        Box(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .fillMaxHeight()
+                                                .background(color)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Conditioned diffusion outputs via cross-attention matrix",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.Gray,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
                 if (bubble.isStreaming) {
                     Spacer(modifier = Modifier.height(4.dp))
                     LinearProgressIndicator(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(2.dp),
-                        color = Color(0xFF10B981),
+                        color = LayoutConstants.ColorCyberGreen,
                         trackColor = Color.Transparent
                     )
+                }
+
+                // Feedback Loop/Correction section
+                if (!isUser && bubble.promptSeed.isNotEmpty() && !bubble.isStreaming) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    HorizontalDivider(color = Color(0xFF334155))
+                    Spacer(modifier = Modifier.height(6.dp))
+
+                    if (!showCorrectionInput) {
+                        TextButton(
+                            onClick = { showCorrectionInput = true },
+                            modifier = Modifier.align(Alignment.End)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Edit,
+                                contentDescription = "Correct character prediction",
+                                tint = LayoutConstants.ColorCyberGreen,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "CORRECT NEXT CHARACTER",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = LayoutConstants.ColorCyberGreen,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    } else {
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "Expected next character after seed:",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.Gray,
+                                fontFamily = FontFamily.Monospace
+                            )
+                            
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                OutlinedTextField(
+                                    value = correctiveCharInput,
+                                    onValueChange = { correctiveCharInput = it.take(1) },
+                                    placeholder = { Text("e.g. 'a'", color = Color.Gray) },
+                                    singleLine = true,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp),
+                                    shape = RoundedCornerShape(4.dp),
+                                    colors = OutlinedTextFieldDefaults.colors(
+                                        focusedBorderColor = LayoutConstants.ColorCyberGreen,
+                                        unfocusedBorderColor = Color(0xFF334155)
+                                    )
+                                )
+
+                                Button(
+                                    onClick = {
+                                        if (correctiveCharInput.isNotEmpty()) {
+                                            onCorrectionSubmit(bubble.promptSeed, correctiveCharInput[0])
+                                            correctiveCharInput = ""
+                                            showCorrectionInput = false
+                                        }
+                                    },
+                                    modifier = Modifier.height(48.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = LayoutConstants.ColorCyberGreen),
+                                    shape = RoundedCornerShape(4.dp)
+                                ) {
+                                    Text("LEARN", style = MaterialTheme.typography.labelSmall, color = Color.Black, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

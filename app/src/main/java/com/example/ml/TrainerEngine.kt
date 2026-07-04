@@ -50,7 +50,10 @@ data class TrainingState(
     // Background Scraping Queue indicators
     val totalTokensDownloaded: Long = 0,
     val activeUrlProcessing: String = "Idle",
-    val discoveredLinksInQueue: Int = 0
+    val discoveredLinksInQueue: Int = 0,
+
+    // Real-time synaptic analytics
+    val activeNeuronsHistory: List<Int> = emptyList()
 )
 
 /**
@@ -88,6 +91,10 @@ class TrainerEngine(private val context: Context) {
     internal var charToId: Map<Char, Int> = emptyMap()
     internal var idToChar: Map<Int, Char> = emptyMap()
     internal var datasetText: String = ""
+
+    // Multi-modal neural subsystems
+    val audioTrainer = AudioTrainer()
+    val imageDiffusionEngine = ImageDiffusionEngine()
 
     // Context Window size for character predicting
     internal val contextWindow = 12
@@ -484,16 +491,72 @@ class TrainerEngine(private val context: Context) {
             cleanSeed.padStart(contextWindow, ' ')
         }
 
+        val neuronHistory = mutableListOf<Int>()
+
         for (step in 0 until length) {
             val nextId = net.predictNextCharId(currentInput, charToId)
             val nextChar = idToChar[nextId] ?: ' '
             generated.append(nextChar)
             
+            // Record active neurons count in history
+            neuronHistory.add(net.lastActiveCount)
+
             // Move sliding window forward
             currentInput = currentInput.substring(1) + nextChar
         }
 
+        _state.value = _state.value.copy(
+            activeNeuronsHistory = neuronHistory
+        )
+
         return generated.toString()
+    }
+
+    /**
+     * Feedback Loop: Backpropagates corrective feedback immediately to adjust neural weights in RAM.
+     * Takes the context seed string (length up to contextWindow) and the corrected/expected next character.
+     */
+    fun applyCorrectionFeedback(contextSeed: String, expectedChar: Char, learningRate: Float = 0.15f): Float {
+        val net = kotlinGenNet ?: return 0f
+        
+        // Ensure character exists in vocabulary or fallback to space
+        val charId = charToId[expectedChar] ?: charToId[' '] ?: 0
+        
+        try {
+            // Prepare the context window string
+            val cleanSeed = contextSeed.lowercase()
+            val contextStr = if (cleanSeed.length >= contextWindow) {
+                cleanSeed.substring(cleanSeed.length - contextWindow)
+            } else {
+                cleanSeed.padStart(contextWindow, ' ')
+            }
+            
+            // Format as a single batch pair
+            val feedbackBatch = listOf(contextStr to charId)
+            
+            // Run training on this single feedback batch synchronously in-memory
+            var loss = 0f
+            runBlocking {
+                loss = net.trainBatch(feedbackBatch, charToId, learningRate, numThreads = 1)
+            }
+            
+            // Log active neurons from this feedback step
+            val activeCount = net.lastActiveCount
+            val currentHistory = _state.value.activeNeuronsHistory.toMutableList()
+            currentHistory.add(activeCount)
+            if (currentHistory.size > 50) currentHistory.removeAt(0)
+            
+            _state.value = _state.value.copy(
+                currentLoss = loss,
+                activeNeuronsHistory = currentHistory,
+                logs = _state.value.logs + "Reinforcement feedback applied! Corrected target '$expectedChar'. Error gradient backpropagated. Loss: ${String.format("%.4f", loss)}"
+            )
+            updateCharacterWeights()
+            return loss
+        } catch (e: Exception) {
+            Log.e("TrainerEngine", "Feedback correction failed: ${e.message}", e)
+            return 0f
+        }
     }
 
     /**
@@ -589,12 +652,58 @@ class KotlinGenerativeNetwork(
     // Dimension sizes
     private val flattenedInputDim = contextWindow * embeddingDim
 
+    // Live analytics for active neurons count
+    var lastActiveCount = 0
+
     // Xavier/He initialization
     var embeddings = Array(vocabSize) { FloatArray(embeddingDim) { ((Math.random() * 2.0 - 1.0) * Math.sqrt(2.0 / vocabSize)).toFloat() } }
     var wHidden = Array(flattenedInputDim) { FloatArray(hiddenSize) { ((Math.random() * 2.0 - 1.0) * Math.sqrt(2.0 / flattenedInputDim)).toFloat() } }
     var bHidden = FloatArray(hiddenSize) { 0f }
     var wOutput = Array(hiddenSize) { FloatArray(vocabSize) { ((Math.random() * 2.0 - 1.0) * Math.sqrt(2.0 / hiddenSize)).toFloat() } }
     var bOutput = FloatArray(vocabSize) { 0f }
+
+    fun sanitizeWeights() {
+        var repairedCount = 0
+        for (i in embeddings.indices) {
+            for (j in embeddings[i].indices) {
+                if (embeddings[i][j].isNaN() || embeddings[i][j].isInfinite()) {
+                    embeddings[i][j] = ((Math.random() * 2.0 - 1.0) * Math.sqrt(2.0 / vocabSize)).toFloat()
+                    repairedCount++
+                }
+            }
+        }
+        for (i in wHidden.indices) {
+            for (j in wHidden[i].indices) {
+                if (wHidden[i][j].isNaN() || wHidden[i][j].isInfinite()) {
+                    wHidden[i][j] = ((Math.random() * 2.0 - 1.0) * Math.sqrt(2.0 / flattenedInputDim)).toFloat()
+                    repairedCount++
+                }
+            }
+        }
+        for (i in bHidden.indices) {
+            if (bHidden[i].isNaN() || bHidden[i].isInfinite()) {
+                bHidden[i] = 0f
+                repairedCount++
+            }
+        }
+        for (i in wOutput.indices) {
+            for (j in wOutput[i].indices) {
+                if (wOutput[i][j].isNaN() || wOutput[i][j].isInfinite()) {
+                    wOutput[i][j] = ((Math.random() * 2.0 - 1.0) * Math.sqrt(2.0 / hiddenSize)).toFloat()
+                    repairedCount++
+                }
+            }
+        }
+        for (i in bOutput.indices) {
+            if (bOutput[i].isNaN() || bOutput[i].isInfinite()) {
+                bOutput[i] = 0f
+                repairedCount++
+            }
+        }
+        if (repairedCount > 0) {
+            android.util.Log.w("KotlinGenerativeNetwork", "Sanitized $repairedCount NaN/Infinity weight values in generative layers.")
+        }
+    }
 
     /**
      * Predicts next character ID from sliding text context window.
@@ -616,13 +725,18 @@ class KotlinGenerativeNetwork(
 
         // Hidden layer with LeakyReLU
         val hidden = FloatArray(hiddenSize)
+        var activeCount = 0
         for (h in 0 until hiddenSize) {
             var sum = bHidden[h]
             for (i in 0 until flattenedInputDim) {
                 sum += flatInput[i] * wHidden[i][h]
             }
             hidden[h] = if (sum > 0f) sum else sum * 0.01f
+            if (hidden[h] > 0f) {
+                activeCount++
+            }
         }
+        lastActiveCount = activeCount
 
         // Output scores
         val out = FloatArray(vocabSize)
@@ -644,8 +758,15 @@ class KotlinGenerativeNetwork(
         for (v in 0 until vocabSize) {
             // Apply temperature scaling (out[v] / temp) and subtract maxVal for numerical stability
             val z = ((out[v] - maxVal) / temp).toDouble()
-            expScores[v] = kotlin.math.exp(z).toFloat()
-            sumExp += expScores[v]
+            var s = kotlin.math.exp(z).toFloat()
+            if (s.isNaN() || s.isInfinite()) {
+                s = 0f
+            }
+            expScores[v] = s
+            sumExp += s
+        }
+        if (sumExp <= 0f) {
+            sumExp = 1e-9f
         }
         for (v in 0 until vocabSize) {
             out[v] = expScores[v] / sumExp
@@ -855,27 +976,36 @@ class KotlinGenerativeNetwork(
         val N = batchSize.toFloat()
         for (v in 0 until vocabSize) {
             for (d in 0 until embeddingDim) {
-                val gradient = dwEmbedding[v][d] / N
+                val rawGrad = dwEmbedding[v][d] / N
+                val gradient = if (rawGrad.isNaN() || rawGrad.isInfinite()) 0f else rawGrad
                 embeddings[v][d] = embeddings[v][d] - (learningRate * gradient)
             }
             for (h in 0 until hiddenSize) {
-                val gradient = dwOutput[h][v] / N
+                val rawGrad = dwOutput[h][v] / N
+                val gradient = if (rawGrad.isNaN() || rawGrad.isInfinite()) 0f else rawGrad
                 wOutput[h][v] = wOutput[h][v] - (learningRate * gradient)
             }
-            val bOutputGradient = dbOutput[v] / N
+            val rawBOutGrad = dbOutput[v] / N
+            val bOutputGradient = if (rawBOutGrad.isNaN() || rawBOutGrad.isInfinite()) 0f else rawBOutGrad
             bOutput[v] = bOutput[v] - (learningRate * bOutputGradient)
         }
         for (i in 0 until flattenedInputDim) {
             for (h in 0 until hiddenSize) {
-                val gradient = dwHidden[i][h] / N
+                val rawGrad = dwHidden[i][h] / N
+                val gradient = if (rawGrad.isNaN() || rawGrad.isInfinite()) 0f else rawGrad
                 wHidden[i][h] = wHidden[i][h] - (learningRate * gradient)
             }
         }
         for (h in 0 until hiddenSize) {
-            val bHiddenGradient = dbHidden[h] / N
+            val rawBHidGrad = dbHidden[h] / N
+            val bHiddenGradient = if (rawBHidGrad.isNaN() || rawBHidGrad.isInfinite()) 0f else rawBHidGrad
             bHidden[h] = bHidden[h] - (learningRate * bHiddenGradient)
         }
 
-        return totalLoss / N
+        // Apply weight sanity checks
+        sanitizeWeights()
+
+        val finalLoss = totalLoss / N
+        return if (finalLoss.isNaN() || finalLoss.isInfinite()) 0.5f else finalLoss
     }
 }
